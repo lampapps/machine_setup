@@ -1,0 +1,3 @@
+# Local machine config — contains personal details, IPs, and tokens.
+# NEVER commit setup.conf to git. Use setup.conf.example as the template.
+setup.conf

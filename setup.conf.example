@@ -1,0 +1,125 @@
+# ==============================================================================
+#  MACHINE SETUP CONFIGURATION
+# ==============================================================================
+#  Copy this file to setup.conf and edit it for your machine.
+#
+#    cp setup.conf.example setup.conf
+#    nano setup.conf
+#
+#  setup.conf is listed in .gitignore and will NOT be committed to git.
+#  This keeps your personal details, tokens, and IPs out of the repository.
+#
+#  Each package has an INSTALL_XXX flag:
+#    true  — install or update this package
+#    false — skip this package entirely
+#
+# ==============================================================================
+
+
+# ==============================================================================
+# PACKAGE FLAGS
+# ==============================================================================
+# Set to true to install/update, false to skip.
+
+INSTALL_GIT=true
+INSTALL_MC=true
+INSTALL_AWSCLI=false
+INSTALL_DUF=true
+INSTALL_DOCKER=false
+INSTALL_TAILSCALE=false
+INSTALL_NFS=true
+
+
+# ==============================================================================
+# GIT CONFIGURATION
+# ==============================================================================
+# Set your global git identity. Leave blank to skip.
+
+GIT_USER_NAME=""
+GIT_USER_EMAIL=""
+
+
+# ==============================================================================
+# AWS CLI CONFIGURATION
+# ==============================================================================
+# Only used when INSTALL_AWSCLI=true
+# AWS CLI v2 is installed from the official AWS installer (not apt).
+
+# Default AWS region (e.g. eu-west-1, us-east-1)
+AWS_DEFAULT_REGION="us-east-1"
+
+
+# ==============================================================================
+# DOCKER CONFIGURATION
+# ==============================================================================
+# Only used when INSTALL_DOCKER=true
+#
+# The user to add to the docker group (so they can run docker without sudo).
+# Set to your regular login username.
+
+DOCKER_USER="pi"
+
+
+# ==============================================================================
+# TAILSCALE CONFIGURATION
+# ==============================================================================
+# Only used when INSTALL_TAILSCALE=true
+#
+# TAILSCALE_AUTH_KEY:
+#   Pre-authentication key from https://login.tailscale.com/admin/settings/keys
+#   If left blank, Tailscale will be installed but NOT connected.
+#   Run 'sudo tailscale up' manually to connect interactively.
+#
+# TAILSCALE_HOSTNAME:
+#   The name this machine will appear as in your Tailscale network and MagicDNS.
+#   Leave blank to automatically use this machine's system hostname (recommended).
+#
+# TAILSCALE_EXTRA_ARGS:
+#   Optional extra flags passed to 'tailscale up'.
+#   Examples:
+#     --ssh                   enable Tailscale SSH
+#     --advertise-exit-node   advertise this node as an exit node
+#     --accept-routes         accept advertised subnet routes
+
+TAILSCALE_AUTH_KEY=""
+TAILSCALE_HOSTNAME=""   # blank = use system hostname automatically
+TAILSCALE_EXTRA_ARGS="--ssh"
+
+
+# ==============================================================================
+# NFS MOUNTS
+# ==============================================================================
+# Only used when INSTALL_NFS=true
+#
+# OPTION A — Auto-discover (recommended):
+#   Set NFS_SERVER_IP and the script will query all exports from the NAS,
+#   mount each one automatically under NFS_MOUNT_BASE/<export_name>.
+#
+# OPTION B — Manual list:
+#   Define NFS_MOUNTS explicitly. If NFS_MOUNTS has entries, NFS_SERVER_IP
+#   is ignored.
+#   Format: "NAS_IP:REMOTE_EXPORT_PATH:LOCAL_MOUNT_POINT:MOUNT_OPTIONS"
+#
+# Notes:
+#   - _netdev and nofail are always added to fstab entries.
+#   - Mount points are created automatically if they do not exist.
+#   - A backup of /etc/fstab is made before any changes.
+#   - Already-mounted entries are detected and skipped.
+
+# Auto-discovery settings (Option A)
+NFS_SERVER_IP="192.168.x.x"
+NFS_VERSION="3"              # NFS protocol version (3 or 4)
+NFS_MOUNT_BASE="/mnt"        # All exports mounted under this path
+NFS_MOUNT_NAME="nas"         # Mount point name: results in /mnt/nas
+                             # Leave blank to use the export's own directory name
+
+# Manual overrides (Option B) — leave empty to use auto-discovery
+NFS_MOUNTS=()
+# NFS_MOUNTS=(
+#   "192.168.x.x:/volume1/backups:/mnt/nas-backups:rw,nfsvers=3"
+#   "192.168.x.x:/volume1/media:/mnt/nas-media:ro,nfsvers=3"
+# )
+
+# ==============================================================================
+# RUN RECORDS (auto-appended by setup.sh — do not edit below this line)
+# ==============================================================================
