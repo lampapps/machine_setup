@@ -13,23 +13,24 @@
 #       nano setup.conf
 #
 #    3. Run:
-#       chmod +x setup.sh && sudo ./setup.sh
+#       chmod +x setup.sh && sudo ./setup.sh [--debug]
 #
 #  OR run directly (config must already exist at ./setup.conf):
 #    curl -fsSL https://raw.githubusercontent.com/lampapps/machine_setup/main/setup.sh | sudo bash
+#    To enable debug output when running directly: `curl ... | sudo bash -s -- --debug`
 #
 #  CUSTOM CONFIG PATH:
-#    sudo ./setup.sh --config /path/to/my.conf
+#    sudo ./setup.sh --config /path/to/my.conf [--debug]
 #
 #  DISCOVER NFS EXPORTS (find the correct remote paths for your NAS):
-#    sudo ./setup.sh --discover-nfs <NAS_IP>
+#    sudo ./setup.sh --discover-nfs <NAS_IP> [--debug]
 #
 # =============================================================================
 
-VERSION="0.1.5"
+VERSION="0.1.6"
 
 # Do NOT use set -e — we handle errors manually to ensure script runs to completion
-set -uo pipefail
+  TS_STATE=$(tailscale status --json ${SILENT_ERR} | grep -oP '"BackendState":\s*"\K[^"]+')
 
 # =============================================================================
 # COLOR & FORMATTING
@@ -131,11 +132,21 @@ get_pkg_version() {
   local pkg="$1"
   local ver
   # Try dpkg first (covers apt and .deb installs)
-  ver=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+  if [[ "${DEBUG:-false}" == "true" ]]; then
+    ver=$(dpkg-query -W -f='${Version}' "$pkg" 2>&1)
+  else
+    ver=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+  fi
   [[ -n "$ver" ]] && echo "$ver" && return
   # Special cases for manually installed tools
   case "$pkg" in
-    awscli) ver=$(aws --version 2>&1 | grep -oP 'aws-cli/\K[^\s]+' 2>/dev/null) ;;
+    awscli)
+      if [[ "${DEBUG:-false}" == "true" ]]; then
+        ver=$(aws --version 2>&1 | grep -oP 'aws-cli/\K[^\s]+')
+      else
+        ver=$(aws --version 2>&1 | grep -oP 'aws-cli/\K[^\s]+' 2>/dev/null)
+      fi
+      ;;
   esac
   echo "${ver:-unknown}"
 }
@@ -151,6 +162,36 @@ track_error()      { ERROR_LIST+=("$1: $2"); }
 # =============================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/setup.conf"
+
+# Debug flag: when true, show command output (do not redirect to /dev/null)
+DEBUG=false
+
+run_cmd() {
+  local cmd="$*"
+  if [[ "${DEBUG:-false}" == "true" ]]; then
+    bash -c "$cmd"
+  else
+    bash -c "$cmd" >/dev/null 2>&1
+  fi
+}
+
+# Run apt-get while respecting debug mode. Removes quiet flag in debug to show full output.
+apt_run() {
+  local args=("$@")
+  # Build a single command string and run through run_cmd so debug controls output
+  local cmd=("apt-get")
+  cmd+=("${args[@]}")
+  run_cmd "${cmd[*]}"
+}
+
+# When not in DEBUG mode, silence stderr/stdout as appropriate.
+if [[ "${DEBUG:-false}" == "true" ]]; then
+  SILENT_ERR=""
+  SILENT_OUT=""
+else
+  SILENT_ERR="2>/dev/null"
+  SILENT_OUT=">/dev/null 2>&1"
+fi
 
 discover_nfs() {
   local ip="$1"
@@ -173,8 +214,8 @@ discover_nfs() {
       error "Run with sudo to install nfs-common"
       exit 1
     fi
-    apt-get update -qq >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nfs-common >/dev/null 2>&1
+    apt_run update -qq
+    DEBIAN_FRONTEND=noninteractive apt_run install -y -qq nfs-common
   fi
 
   local exports
@@ -263,7 +304,7 @@ discover_nfs() {
 
   if [[ "$confirm" =~ ^[Yy] ]]; then
     # Check if NFS_MOUNTS already exists in config
-    if grep -q '^NFS_MOUNTS=(' "$CONFIG_FILE" 2>/dev/null; then
+    if grep -q '^NFS_MOUNTS=(' "$CONFIG_FILE" ${SILENT_ERR}; then
       # Insert new entries before the closing )
       local insert_lines=""
       for entry in "${accepted_entries[@]}"; do
@@ -308,12 +349,13 @@ discover_nfs() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --config|-c) CONFIG_FILE="$2"; shift 2 ;;
+    --debug) DEBUG=true; shift ;;
     --discover-nfs|-n)
       discover_nfs "${2:-}"
       ;;
     --help|-h)
-      echo "Usage: sudo $0 [--config /path/to/setup.conf]"
-      echo "       sudo $0 --discover-nfs <NAS_IP>"
+      echo "Usage: sudo $0 [--config /path/to/setup.conf] [--debug]"
+      echo "       sudo $0 --discover-nfs <NAS_IP> [--debug]"
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -333,7 +375,7 @@ echo ""
 info "Script started at $(date '+%Y-%m-%d %H:%M:%S')"
 info "Hostname: $(hostname)"
 info "OS: $(. /etc/os-release && echo "$PRETTY_NAME")"
-echo ""
+
 
 # Must be root
 if [[ $EUID -ne 0 ]]; then
@@ -368,24 +410,33 @@ source "$CONFIG_FILE"
 # =============================================================================
 apt_install() {
   local pkg="$1"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >/dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt_run install -y -qq "$pkg"
 }
 
 apt_update_pkg() {
   local pkg="$1"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --only-upgrade "$pkg" >/dev/null 2>&1
+  DEBIAN_FRONTEND=noninteractive apt_run install -y -qq --only-upgrade "$pkg"
 }
 
 is_installed() {
-  dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+  if [[ "${DEBUG:-false}" == "true" ]]; then
+    dpkg -l "$1" | grep -q "^ii"
+  else
+    dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+  fi
 }
 
 # Returns 0 if a newer candidate version is available for the package
 is_upgradable() {
   local pkg="$1"
   local installed candidate
-  installed=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Installed:/ {print $2}')
-  candidate=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')
+  if [[ "${DEBUG:-false}" == "true" ]]; then
+    installed=$(apt-cache policy "$pkg" | awk '/Installed:/ {print $2}')
+    candidate=$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2}')
+  else
+    installed=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Installed:/ {print $2}')
+    candidate=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')
+  fi
   [[ -n "$installed" && "$installed" != "(none)" && -n "$candidate" && "$installed" != "$candidate" ]]
 }
 
@@ -395,7 +446,7 @@ is_upgradable() {
 header "SYSTEM UPDATE"
 
 task "Updating package lists"
-if apt-get update -qq >/dev/null 2>&1; then
+if apt_run update -qq; then
   ok
 else
   fail
@@ -424,13 +475,13 @@ else
 
   if [[ -n "${GIT_USER_NAME:-}" ]] && command -v git &>/dev/null; then
     task "Configuring git user name"
-    if git config --global user.name "$GIT_USER_NAME" 2>/dev/null; then ok
+    if run_cmd "git config --global user.name \"$GIT_USER_NAME\""; then ok
     else fail; track_error "git config" "Failed to set user.name"; fi
   fi
 
   if [[ -n "${GIT_USER_EMAIL:-}" ]] && command -v git &>/dev/null; then
     task "Configuring git user email"
-    if git config --global user.email "$GIT_USER_EMAIL" 2>/dev/null; then ok
+    if run_cmd "git config --global user.email \"$GIT_USER_EMAIL\""; then ok
     else fail; track_error "git config" "Failed to set user.email"; fi
   fi
 fi
@@ -473,7 +524,7 @@ else
 
     # Fetch latest version from GitHub tags (lightweight, no zip download)
     task "awscli (checking version)"
-    AWSCLI_LATEST=$(curl -fsSL "https://api.github.com/repos/aws/aws-cli/git/refs/tags" 2>/dev/null \
+    AWSCLI_LATEST=$(curl -fsSL "https://api.github.com/repos/aws/aws-cli/git/refs/tags" ${SILENT_ERR} \
       | grep -oP '"ref":\s*"refs/tags/\K[0-9]+\.[0-9]+\.[0-9]+' \
       | sort -V | tail -1)
 
@@ -486,9 +537,9 @@ else
       ok
       task "awscli (downloading ${AWSCLI_INSTALLED} → ${AWSCLI_LATEST})"
       if curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" \
-          -o "${AWSCLI_TMP}/awscliv2.zip" 2>/dev/null \
-        && unzip -q "${AWSCLI_TMP}/awscliv2.zip" -d "$AWSCLI_TMP" 2>/dev/null \
-        && "${AWSCLI_TMP}/aws/install" --update >/dev/null 2>&1; then
+          -o "${AWSCLI_TMP}/awscliv2.zip" ${SILENT_ERR} \
+        && unzip -q "${AWSCLI_TMP}/awscliv2.zip" -d "$AWSCLI_TMP" ${SILENT_ERR} \
+        && run_cmd "${AWSCLI_TMP}/aws/install --update"; then
         # Verify version actually changed after install
         AWSCLI_NEW=$(aws --version 2>&1 | grep -oP 'aws-cli/\K[^\s]+')
         if [[ "$AWSCLI_NEW" != "$AWSCLI_INSTALLED" ]]; then
@@ -503,9 +554,9 @@ else
   else
     task "awscli (downloading installer)"
     if curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" \
-        -o "${AWSCLI_TMP}/awscliv2.zip" 2>/dev/null \
-      && unzip -q "${AWSCLI_TMP}/awscliv2.zip" -d "$AWSCLI_TMP" 2>/dev/null \
-      && "${AWSCLI_TMP}/aws/install" >/dev/null 2>&1; then
+        -o "${AWSCLI_TMP}/awscliv2.zip" ${SILENT_ERR} \
+      && unzip -q "${AWSCLI_TMP}/awscliv2.zip" -d "$AWSCLI_TMP" ${SILENT_ERR} \
+      && run_cmd "${AWSCLI_TMP}/aws/install"; then
       installed_new; track_installed "awscli"
     else
       fail; track_error "awscli" "Install failed"
@@ -514,7 +565,7 @@ else
 
   if [[ -n "${AWS_DEFAULT_REGION:-}" ]] && command -v aws &>/dev/null; then
     task "Configuring AWS default region"
-    if aws configure set default.region "$AWS_DEFAULT_REGION" 2>/dev/null; then ok
+    if run_cmd "aws configure set default.region \"$AWS_DEFAULT_REGION\""; then ok
     else fail; track_error "aws config" "Failed to set region"; fi
   fi
 
@@ -533,12 +584,12 @@ else
   if is_installed duf || command -v duf &>/dev/null; then
     if is_upgradable duf; then
       _old=$(get_pkg_version duf)
-      if apt_update_pkg duf 2>/dev/null; then updated; track_updated "duf" "$_old"
+      if apt_update_pkg duf ${SILENT_ERR}; then updated; track_updated "duf" "$_old"
       else fail; track_error "duf" "Update failed"; fi
     else ok; info "Already up to date"; track_current "duf"; fi
   else
     # Try apt first, fall back to GitHub release
-    if apt_install duf 2>/dev/null; then
+    if apt_install duf ${SILENT_ERR}; then
       installed_new; track_installed "duf"
     else
       # Install from GitHub releases
@@ -550,8 +601,8 @@ else
         | cut -d '"' -f 4 | head -1)
 
       if [[ -n "$DUF_URL" ]] \
-        && curl -fsSL "$DUF_URL" -o "${DUF_TMP}/duf.deb" 2>/dev/null \
-        && dpkg -i "${DUF_TMP}/duf.deb" >/dev/null 2>&1; then
+        && curl -fsSL "$DUF_URL" -o "${DUF_TMP}/duf.deb" ${SILENT_ERR} \
+          && run_cmd "dpkg -i \"${DUF_TMP}/duf.deb\""; then
         installed_new; track_installed "duf"
       else
         fail; track_error "duf" "Install failed"
@@ -573,7 +624,7 @@ else
     task "docker (already installed, checking for updates)"
     if is_upgradable docker-ce; then
       _old=$(get_pkg_version docker-ce)
-      if apt_update_pkg docker-ce 2>/dev/null; then updated; track_updated "docker" "$_old"
+      if apt_update_pkg docker-ce ${SILENT_ERR}; then updated; track_updated "docker" "$_old"
       else fail; track_error "docker" "Update failed"; fi
     else ok; info "Already up to date"; track_current "docker-ce"; fi
   else
@@ -581,12 +632,12 @@ else
     DOCKER_OK=true
 
     # Install prerequisites
-    apt_install "ca-certificates curl gnupg" 2>/dev/null || true
+    apt_install "ca-certificates curl gnupg" ${SILENT_ERR} || true
     install -m 0755 -d /etc/apt/keyrings
 
     # Add Docker GPG key
     if curl -fsSL https://download.docker.com/linux/debian/gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null; then
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg ${SILENT_ERR}; then
       chmod a+r /etc/apt/keyrings/docker.gpg
       ok
     else
@@ -601,7 +652,7 @@ signed-by=/etc/apt/keyrings/docker.gpg] \
 https://download.docker.com/linux/debian ${DISTRO_CODENAME} stable" \
         > /etc/apt/sources.list.d/docker.list
 
-      if apt-get update -qq >/dev/null 2>&1; then ok
+      if apt_run update -qq; then ok
       else fail; DOCKER_OK=false; track_error "docker" "apt update after adding repo failed"; fi
     fi
 
@@ -618,13 +669,13 @@ https://download.docker.com/linux/debian ${DISTRO_CODENAME} stable" \
   # Add user to docker group
   if [[ -n "${DOCKER_USER:-}" ]] && id "$DOCKER_USER" &>/dev/null; then
     task "Adding $DOCKER_USER to docker group"
-    if usermod -aG docker "$DOCKER_USER" 2>/dev/null; then ok
+    if run_cmd "usermod -aG docker \"$DOCKER_USER\""; then ok
     else fail; track_error "docker group" "Failed to add $DOCKER_USER"; fi
   fi
 
   # Enable and start Docker
   task "Enabling docker service"
-  if systemctl enable --now docker >/dev/null 2>&1; then ok
+  if run_cmd "systemctl enable --now docker"; then ok
   else fail; track_error "docker" "Failed to enable service"; fi
 fi
 
@@ -640,7 +691,7 @@ else
     task "tailscale (already installed, checking for updates)"
     if is_upgradable tailscale; then
       _old=$(get_pkg_version tailscale)
-      if apt_update_pkg tailscale 2>/dev/null; then updated; track_updated "tailscale" "$_old"
+      if apt_update_pkg tailscale ${SILENT_ERR}; then updated; track_updated "tailscale" "$_old"
       else fail; track_error "tailscale" "Update failed"; fi
     else ok; info "Already up to date"; track_current "tailscale"; fi
   else
@@ -648,11 +699,11 @@ else
     TAILSCALE_OK=true
 
     if curl -fsSL https://pkgs.tailscale.com/stable/debian/$(. /etc/os-release && echo "$VERSION_CODENAME").gpg \
-        | gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg 2>/dev/null \
+        | gpg --dearmor -o /usr/share/keyrings/tailscale-archive-keyring.gpg ${SILENT_ERR} \
       && curl -fsSL https://pkgs.tailscale.com/stable/debian/$(. /etc/os-release && echo "$VERSION_CODENAME").list \
         | sed 's|]/|] signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg /|' \
-        > /etc/apt/sources.list.d/tailscale.list 2>/dev/null \
-      && apt-get update -qq >/dev/null 2>&1; then
+        > /etc/apt/sources.list.d/tailscale.list ${SILENT_ERR} \
+      && apt_run update -qq; then
       ok
     else
       fail; TAILSCALE_OK=false; track_error "tailscale" "Failed to add repository"
@@ -668,21 +719,20 @@ else
     fi
 
     task "Enabling tailscale service"
-    if systemctl enable --now tailscaled >/dev/null 2>&1; then ok
+    if run_cmd "systemctl enable --now tailscaled"; then ok
     else fail; track_error "tailscale" "Failed to enable service"; fi
   fi
 
   # Connect to Tailscale if auth key is provided and not already connected
   if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
     task "Checking Tailscale connection status"
-    TS_STATE=$(tailscale status --json 2>/dev/null | grep -oP '"BackendState":\s*"\K[^"]+')
+      TS_STATE=$(tailscale status --json ${SILENT_ERR} | grep -oP '"BackendState":\s*"\K[^"]+')
     if [[ "$TS_STATE" == "Running" ]]; then
       ok; info "Already connected to Tailscale — skipping 'tailscale up'"
     else
       ok
       task "Connecting to Tailscale network"
-      if tailscale up --authkey="$TAILSCALE_AUTH_KEY" --hostname="${TAILSCALE_HOSTNAME:-$(hostname)}" \
-          ${TAILSCALE_EXTRA_ARGS:-} >/dev/null 2>&1; then
+      if run_cmd "tailscale up --authkey=\"$TAILSCALE_AUTH_KEY\" --hostname=\"${TAILSCALE_HOSTNAME:-$(hostname)}\" ${TAILSCALE_EXTRA_ARGS:-}"; then
         ok
       else
         fail; track_error "tailscale" "Failed to connect (check auth key)"
@@ -726,11 +776,15 @@ else
     local_base="${NFS_MOUNT_BASE:-/mnt}"
 
     task "Querying NFS exports on ${NFS_SERVER_IP}"
-    raw_exports=$(showmount -e "${NFS_SERVER_IP}" 2>&1)
+    if [[ "${DEBUG:-false}" == "true" ]]; then
+      raw_exports=$(showmount -e "${NFS_SERVER_IP}" 2>&1)
+    else
+      raw_exports=$(showmount -e "${NFS_SERVER_IP}" 2>/dev/null)
+    fi
     if [[ $? -ne 0 ]]; then
       fail
       warn "Could not reach NFS server at ${NFS_SERVER_IP} — skipping mounts"
-      track_error "nfs discover" "showmount failed for ${NFS_SERVER_IP}"
+        track_error "nfs discover" "showmount failed for ${NFS_SERVER_IP}"
     else
       ok
       while IFS= read -r line; do
@@ -739,7 +793,7 @@ else
         [[ -z "$exp_path" ]] && continue
 
         # Check if this export is already mounted anywhere
-        if grep -qF "${NFS_SERVER_IP}:${exp_path}" /proc/mounts 2>/dev/null; then
+        if grep -qF "${NFS_SERVER_IP}:${exp_path}" /proc/mounts ${SILENT_ERR}; then
           existing_mp=$(awk -v src="${NFS_SERVER_IP}:${exp_path}" '$1==src {print $2}' /proc/mounts)
           info "Already mounted: ${exp_path} → ${existing_mp} — skipping"
           continue
@@ -785,42 +839,42 @@ else
       [[ -z "$nas_ip" || -z "$remote_path" || -z "$mount_point" ]] && continue
 
       # Check if this export is already mounted anywhere (catches duplicate/different mount point)
-      if grep -qF "${nas_ip}:${remote_path}" /proc/mounts 2>/dev/null; then
+      if grep -qF "${nas_ip}:${remote_path}" /proc/mounts ${SILENT_ERR}; then
         existing_mp=$(awk -v src="${nas_ip}:${remote_path}" '$1==src {print $2}' /proc/mounts)
         task "Mount ${remote_path}"; ok; info "Already mounted at ${existing_mp} — skipping"
         continue
       fi
 
       # Already in fstab AND actively mounted — nothing to do
-      if grep -qF "${nas_ip}:${remote_path}" /etc/fstab 2>/dev/null \
-          && mountpoint -q "$mount_point" 2>/dev/null; then
+        if grep -qF "${nas_ip}:${remote_path}" /etc/fstab ${SILENT_ERR} \
+          && mountpoint -q "$mount_point" ${SILENT_ERR}; then
         task "Mount $mount_point"; ok; info "Already configured and mounted — skipping"
         continue
       fi
 
       # Create mount point if needed
       task "Creating mount point: $mount_point"
-      if mkdir -p "$mount_point" 2>/dev/null; then ok
+      if run_cmd "mkdir -p \"$mount_point\""; then ok
       else fail; track_error "nfs mount" "Could not create $mount_point"; continue; fi
 
       FSTAB_ENTRY="${nas_ip}:${remote_path} ${mount_point} nfs ${mount_opts},_netdev,nofail 0 0"
 
       # Add to fstab only if not already present
-      if grep -qF "${nas_ip}:${remote_path}" /etc/fstab 2>/dev/null; then
+      if grep -qF "${nas_ip}:${remote_path}" /etc/fstab ${SILENT_ERR}; then
         task "fstab entry for $remote_path"; ok; info "Already exists — skipping add"
       else
         if [[ "$FSTAB_BACKED_UP" == "false" ]]; then
-          cp /etc/fstab "/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+          run_cmd "cp /etc/fstab \"/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)\" || true"
           FSTAB_BACKED_UP=true
         fi
         task "Adding fstab entry for $remote_path"
-        if echo "$FSTAB_ENTRY" >> /etc/fstab 2>/dev/null; then ok
+        if run_cmd "bash -c 'printf \"%s\\n\" \"$FSTAB_ENTRY\" >> /etc/fstab'"; then ok
         else fail; track_error "fstab" "Failed to add entry for $remote_path"; continue; fi
       fi
 
       # Attempt mount
       task "Mounting ${nas_ip}:${remote_path}"
-      if mount "$mount_point" >/dev/null 2>&1; then
+      if run_cmd "mount \"$mount_point\""; then
         ok
       else
         fail
